@@ -70,6 +70,9 @@ fi
 
 # ────────────────────────────── interactivity ─────────────────────────────
 FORCE_NONINTERACTIVE=0
+# Set by pick_project() -- it runs in the MAIN shell (not a subshell), so its
+# die/exit terminates the whole script. Holds the project the user chose.
+PICK_PROJECT=""
 # Interactive only when not forced off, stdout is a terminal, and /dev/tty is a
 # usable char device -- this is what keeps `curl ... | bash` interactive (stdin is
 # the script pipe, but /dev/tty is still the user's terminal) while using
@@ -487,20 +490,50 @@ monitor_menu() {
 
 # ──────────────────────────── interactive run ─────────────────────────────
 pick_project() {
-  local idx=0 row name title sub back mark
-  echo; printf "${C_BOLD}Choose a use case to run:${R}  ${C_DIM}(web/api ports shown)${R}\n"
+  local idx=0 row name title sub back mark choice="" read_failed=0
+  # Menu -> STDERR. This fn used to be called as `run_project "$(pick_project)"`,
+  # which captured the menu (stdout) and handed it back as a bogus "project name"
+  # inside an error. Only the chosen name may reach stdout; the menu is UI, not data.
+  echo >&2; printf "${C_BOLD}Choose a use case to run:${R}  ${C_DIM}(web/api ports shown)${R}\n" >&2
   for row in "${PROJECTS[@]}"; do
     idx=$((idx+1))
     name="$(proj_field "$row" 1)"; title="$(proj_field "$row" 2)"; sub="$(proj_field "$row" 3)"; back="$(proj_field "$row" 4)"
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${name}-"; then mark="${C_GREEN}${G_BUL}running${R}"; else mark="${C_DIM}${G_DOT}${R}"; fi
-    printf "  ${C_BOLD}%-2d${R} %-24s %-12s ${C_DIM}:%s/%s${R}\n" "$idx" "$name" "$mark" "$(frontend_port "$back")" "$back"
-    printf "     ${C_DIM}%s -- %s${R}\n" "$title" "$sub"
+    printf "  ${C_BOLD}%-2d${R} %-24s %-12s ${C_DIM}:%s/%s${R}\n" "$idx" "$name" "$mark" "$(frontend_port "$back")" "$back" >&2
+    printf "     ${C_DIM}%s -- %s${R}\n" "$title" "$sub" >&2
   done
-  local choice
-  choice="$(prompt "Number [1-${#PROJECTS[@]}]" "")"
+  if has_tty; then
+    printf "%s " "${C_CYAN}?${R} ${C_BOLD}Number [1-${#PROJECTS[@]}]${R}" >&2
+    # Read directly (not via the prompt() helper): we need the read's exit code to
+    # tell EOF (can't interact at all) apart from an empty Enter, and we must stay
+    # in THIS shell so a failure can exit the whole script (not a subshell).
+    if ! IFS= read -r choice </dev/tty 2>/dev/null; then read_failed=1; fi
+  else
+    read_failed=1   # wizard mode reached with no usable terminal -> can't interact
+  fi
+  if [ "$read_failed" = "1" ]; then
+    cat >&2 <<EOF
+${C_RED}${G_X} Can't read keyboard input in this shell.${R}
+
+This happens with ${C_BOLD}curl ... | bash${R} over some SSH / web-console sessions: the menu
+shows, but the script never receives your keystrokes. Pick one:
+
+  ${C_BOLD}1)${R} Run from the checkout (stdin is then your real terminal):
+       cd "${KOBOI_UC_HOME:-$HOME/koboi-projects}" && bash quickstart.sh
+
+  ${C_BOLD}2)${R} Or go non-interactive -- choose a project and set your key first:
+       export OPENAI_API_KEY=sk-...
+       bash quickstart.sh --project hr-screening --yes
+     ${C_DIM}(see all projects: bash quickstart.sh --list)${R}
+
+  ${C_BOLD}3)${R} If Docker also complained about permissions, add yourself once:
+       sudo usermod -aG docker \$USER && newgrp docker
+EOF
+    exit 1
+  fi
   [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#PROJECTS[@]}" ] \
     || die "invalid choice '$choice'."
-  echo "$(proj_field "${PROJECTS[$((choice-1))]}" 1)"
+  PICK_PROJECT="$(proj_field "${PROJECTS[$((choice-1))]}" 1)"
 }
 
 run_project() {
@@ -531,7 +564,7 @@ run_project() {
   else handle_unhealthy "$project" "$backend"; fi
 }
 
-main_wizard() { set_total_steps 5; preflight; bootstrap_repo; run_project "$(pick_project)"; }
+main_wizard() { set_total_steps 5; preflight; bootstrap_repo; pick_project; run_project "$PICK_PROJECT"; }
 
 # ─────────────────────────── subcommands ──────────────────────────────────
 cmd_list() {

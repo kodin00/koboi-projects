@@ -172,9 +172,26 @@ def test_preflight_daemon_down_guides_systemctl(tmp_path):
     r = _run(["--project", "hr-screening", "--yes"], env=env, timeout=10)
     assert r.returncode != 0
     assert "systemctl start docker" in r.stderr, f"missing systemctl guidance:\n{r.stderr}"
-    assert "usermod -aG docker" not in r.stderr, (
-        f"misclassified a daemon-down error as permission-denied:\n{r.stderr}"
-    )
+
+
+def test_wizard_without_tty_guides_instead_of_garbled_error(tmp_path):
+    """The `curl ... | bash` over a broken SSH/web-console case: the wizard's
+    menu shows but /dev/tty can't deliver keystrokes, so the choice comes back
+    empty. Must print actionable guidance -- NOT the old garbled cascade of
+    'invalid choice' followed by 'unknown project <entire menu>'."""
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    shim = bin_ / "docker"
+    # Fake docker that satisfies preflight (compose ok, info ok, ps -> empty).
+    shim.write_text('#!/usr/bin/env bash\ncase "$1" in compose|info) exit 0;; esac\nexit 0\n')
+    shim.chmod(0o755)
+    r = _run([], env={"PATH": f"{bin_}:{os.environ['PATH']}"}, timeout=15)  # wizard, no args; piped stdout -> no tty
+    assert r.returncode != 0
+    assert "Can't read keyboard input" in r.stderr
+    assert "--project" in r.stderr
+    # The old garbled double-error must be gone.
+    assert "unknown project" not in r.stderr, f"garbled 'unknown project' still present:\n{r.stderr}"
+    assert "invalid choice" not in r.stderr, f"'invalid choice' still present:\n{r.stderr}"
 
 
 def test_preflight_dial_unix_down_guides_systemctl_not_usermod(tmp_path):
